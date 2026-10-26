@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-Standalone, local web app that detects and black-box redacts Quebec health insurance numbers (RAMQ / NAM) and patient names from PDF documents. Upload a PDF, cut dense pages into small zones, watch detection run page by page, review and adjust the blackout boxes, then download the redacted result. Appointment rows can then be marked, confirmed and approved, and exported as a JSON manifest that traces every row back to its original page. Work is saved locally and survives restarts.
+Standalone, local web app that detects and black-box redacts Quebec health insurance numbers (RAMQ / NAM) and patient names from PDF documents. Upload a PDF, cut dense pages into small zones, watch detection run page by page, review and adjust the blackout boxes. Appointment rows can then be marked, confirmed and approved, and exported as a JSON manifest that traces every row back to its original page. Work is saved locally and survives restarts.
 
 Redaction runs **100% locally on CPU** — no GPU, no Redis, no database, and no LLMs (name detection uses a small local spaCy model). The server binds to `127.0.0.1` only. The one optional cloud step is **appointment-row extraction** (see below): when you choose to run it, the already-redacted image of each row is sent to a vision model through OpenRouter, over zero-data-retention routes only. Nothing else about your document is ever sent.
 
@@ -122,13 +122,9 @@ documents, so exposing it on a network interface should not be one flag away.
    in, and each section keeps its own date.
    **Save review** stores your boxes and page dates as a numbered revision.
    Detections are kept separately and never edited, so *Reset to detected*
-   always goes back to them. The saved review is authoritative: the output PDF
-   and every evidence crop are rendered from it.
-5. **Redact & download** — the saved review is burned into a new image-only
-   PDF. (Redacting saves your current edits first.) The original text layer is
-   discarded, so a number cannot be recovered by selecting or copying text,
-   and the pseudonym is all that remains visible.
-6. **Appointment rows** — the *Appointment rows* tab of the review. See below.
+   always goes back to them. The saved review is authoritative: every evidence
+   crop is rendered from it.
+5. **Appointment rows** — the *Appointment rows* tab of the review. See below.
 
 Patient names show up in review as plain blackouts with an amber outline. For
 a name detection missed, draw a box and choose *It's a name*.
