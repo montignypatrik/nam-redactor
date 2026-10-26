@@ -49,3 +49,36 @@ def test_locate_nam_ignores_non_nam_text():
         MockBlock("Code d'acte: 08123 Montant: 48.75 $", (0, 90, 250, 110)),
     ]
     assert locate_nam_regions(blocks, 300, 300) == []
+
+
+def test_locate_nam_glued_to_a_space_separated_label():
+    """A NAM sharing its line with a label and no colon separator.
+
+    'NAM HOGP 3361 0615' is a single 15-character run, so validating the run
+    as a whole rejects it and the NAM inside is lost. This was the real-scan
+    failure: OCR read the number correctly and the locator discarded it.
+    """
+    block = MockBlock("NAM HOGP 3361 0615", (0, 0, 210, 20))
+    regions = locate_nam_regions([block], 210, 20)
+
+    assert len(regions) == 1
+    # The box must start after the label, not at the beginning of the line.
+    assert regions[0]["x1"] > 0.15
+    assert regions[0]["confidence"] >= 0.6
+
+
+def test_locate_nam_fused_label_and_name_letters():
+    """No group boundary to cut at: the window fallback must rescue it."""
+    block = MockBlock("NAMHOGP 3361 0615", (0, 0, 190, 20))
+    regions = locate_nam_regions([block], 190, 20)
+
+    assert len(regions) == 1
+    assert regions[0]["x1"] > 0.1
+
+
+def test_locate_nam_in_a_crowded_line_yields_exactly_one_region():
+    """Extra words around the NAM must not produce duplicate boxes."""
+    block = MockBlock("Dossier 4471 NAM HOGP 3361 0615", (0, 0, 400, 20))
+    regions = locate_nam_regions([block], 400, 20)
+
+    assert len(regions) == 1

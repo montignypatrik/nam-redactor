@@ -2,9 +2,15 @@
 
 PaddleOCR reports one box per text line. A NAM often shares a line with a
 label, so each match is refined to the matched characters by interpolating
-their offsets across the line's bounding box — the smallest box that still
+their offsets across the line's bounding box -- the smallest box that still
 covers the whole NAM. Detection reuses the deterministic ``validate_ramq``
 rules (OCR-confusion tolerant, no LLM).
+
+A NAM is also frequently *glued* to its label: a line reading
+``NAM HOGP 3361 0615`` is one OCR run of 15 cleaned characters, so validating
+the run as a whole rejects it and discards a perfectly good 12-character NAM.
+Each run is therefore searched for NAM-length spans -- see
+:func:`_run_candidates`.
 
 Regions are returned normalized (0..1) against the processed page image.
 Only boxes are produced — never raw PII values.
@@ -12,18 +18,25 @@ Only boxes are produced — never raw PII values.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Iterator, Sequence
+from typing import Any, NamedTuple
 
-from .validation import clean_ramq_run, validate_ramq
+from .validation import canonical_nam, clean_ramq_run, validate_ramq
 
 #: A run of alphanumerics optionally split by spaces/dashes, matching both
 #: "abcd12345678" and "abcd 1234 5678".
 _NAM_RUN = re.compile(r"[A-Za-z0-9]+(?:[\s\-–—]+[A-Za-z0-9]+){0,5}")
+#: A single alphanumeric group within a run.
+_ALNUM_GROUP = re.compile(r"[A-Za-z0-9]+")
 _SEPARATORS = frozenset(" \t-–—")
 MIN_CONFIDENCE = 0.6
 #: Safety margin around a matched run, in source pixels.
 BOX_PADDING_PX = 2
+#: A NAM spans at most four groups ("HOGP 33 61 06 15" is five, so allow five).
+_MAX_RUN_GROUPS = 5
+#: NAM length: 4 letters + 8 digits. The 13th character is an optional check
+#: digit that is ignored here.
+_NAM_LENGTHS = (12, 13)
 
 
 def _bbox_of(block: Any) -> tuple[int, int, int, int] | None:
@@ -72,39 +85,110 @@ def _overlap_ratio(a: tuple[float, float, float, float], b: tuple[float, float, 
     return inter / smaller if smaller > 0 else 0.0
 
 
+def _run_candidates(run_text: str, offset: int) -> Iterator[tuple[str, list[int]]]:
+    """Yield NAM-length candidates found *inside* one OCR run.
+
+    Newlines aside, a run is what OCR read as one uninterrupted string, so a
+    label sharing the line lands in the same run. Validating only the whole
+    run means ``NAM HOGP 3361 0615`` (15 cleaned characters) is rejected
+    outright and the NAM inside it is never examined.
+
+    Two passes, in order:
+
+    1. Contiguous **groups** of alphanumerics. This is how NAMs are written --
+       letters then digit groups -- and it never splits a word, so it cannot
+       invent a NAM out of the tail of one word plus the head of another.
+    2. Only if step 1 found nothing for this run, slide a 12-character window.
+       This rescues a label fused to the name letters (``NAMHOGP 3361 0615``),
+       where there is no group boundary to cut at. Scoped per run rather than
+       per page so it does not loosen the search everywhere.
+
+    Yields ``(cleaned, positions)`` where ``positions`` are the source indices
+    of each cleaned character, for bounding-box refinement.
+    """
+    groups = list(_ALNUM_GROUP.finditer(run_text))
+    yielded = False
+    for i in range(len(groups)):
+        for j in range(i, min(i + _MAX_RUN_GROUPS, len(groups))):
+            start, stop = groups[i].start(), groups[j].end()
+            cleaned, positions = _clean_with_positions(
+                run_text[start:stop], offset + start
+            )
+            if len(cleaned) in _NAM_LENGTHS:
+                yielded = True
+                yield cleaned, positions
+
+    if yielded:
+        return
+
+    cleaned, positions = _clean_with_positions(run_text, offset)
+    for start in range(max(0, len(cleaned) - 11)):
+        window = cleaned[start:start + 12]
+        if len(window) == 12:
+            yield window, positions[start:start + 12]
+
+
+class _Candidate(NamedTuple):
+    """A detected NAM region plus the identity behind it.
+
+    ``canonical`` has to ride on the candidate rather than sit in a parallel
+    array: ``_normalize`` and ``_dedupe`` both *drop* entries, so any
+    index-based pairing would silently misalign.
+    """
+
+    bbox: tuple[float, float, float, float]
+    confidence: float
+    canonical: str
+
+
+def _candidate_dict(candidate: _Candidate) -> dict[str, float]:
+    x1, y1, x2, y2 = candidate.bbox
+    return {
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+        "confidence": candidate.confidence,
+    }
+
+
 def _single_block_regions(
     blocks: Sequence[Any], min_confidence: float
-) -> list[dict[str, Any]]:
-    found: list[dict[str, Any]] = []
+) -> list[_Candidate]:
+    found: list[_Candidate] = []
     for block in blocks:
         text = getattr(block, "text", "") or ""
         bbox = _bbox_of(block)
         if bbox is None or not text.strip():
             continue
         for match in _NAM_RUN.finditer(text):
-            cleaned, positions = _clean_with_positions(match.group(0), match.start())
-            if len(cleaned) < 12:
-                continue
-            ok, confidence, _problems = validate_ramq(cleaned)
-            if not ok or confidence < min_confidence:
-                continue
-            found.append({
-                "bbox": _refine_bbox(bbox, len(text), positions[0], positions[-1] + 1),
-                "confidence": round(confidence, 3),
-            })
+            for cleaned, positions in _run_candidates(match.group(0), match.start()):
+                ok, confidence, _problems = validate_ramq(cleaned)
+                if not ok or confidence < min_confidence:
+                    continue
+                canonical = canonical_nam(cleaned)
+                if canonical is None:
+                    continue
+                found.append(_Candidate(
+                    bbox=_refine_bbox(
+                        bbox, len(text), positions[0], positions[-1] + 1
+                    ),
+                    confidence=round(confidence, 3),
+                    canonical=canonical,
+                ))
     return found
 
 
 def _split_block_regions(
     blocks: Sequence[Any], min_confidence: float
-) -> list[dict[str, Any]]:
+) -> list[_Candidate]:
     """Join a NAM split across two adjacent blocks on the same row."""
     items = [
         (block, _bbox_of(block))
         for block in blocks
         if _bbox_of(block) is not None and (getattr(block, "text", "") or "").strip()
     ]
-    found: list[dict[str, Any]] = []
+    found: list[_Candidate] = []
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             left_block, left = items[i]
@@ -122,25 +206,30 @@ def _split_block_regions(
             right_clean = clean_ramq_run(right_block.text)
             if validate_ramq(left_clean)[0] or validate_ramq(right_clean)[0]:
                 continue
-            ok, confidence, _problems = validate_ramq(left_clean + right_clean)
+            joined = left_clean + right_clean
+            ok, confidence, _problems = validate_ramq(joined)
             if not ok or confidence < min_confidence:
                 continue
-            found.append({
-                "bbox": (
+            canonical = canonical_nam(joined)
+            if canonical is None:
+                continue
+            found.append(_Candidate(
+                bbox=(
                     float(min(left[0], right[0])), float(min(left[1], right[1])),
                     float(max(left[2], right[2])), float(max(left[3], right[3])),
                 ),
-                "confidence": round(max(0.0, confidence - 0.05), 3),
-            })
+                confidence=round(max(0.0, confidence - 0.05), 3),
+                canonical=canonical,
+            ))
     return found
 
 
 def _normalize(
-    regions: Sequence[dict[str, Any]], width: int, height: int, padding: int
-) -> list[dict[str, float]]:
-    normalized: list[dict[str, float]] = []
-    for region in regions:
-        x1, y1, x2, y2 = region["bbox"]
+    candidates: Sequence[_Candidate], width: int, height: int, padding: int
+) -> list[_Candidate]:
+    normalized: list[_Candidate] = []
+    for candidate in candidates:
+        x1, y1, x2, y2 = candidate.bbox
         x1, y1 = x1 - padding, y1 - padding
         x2, y2 = x2 + padding, y2 + padding
         nx1 = max(0.0, min(1.0, x1 / width))
@@ -149,25 +238,36 @@ def _normalize(
         ny2 = max(0.0, min(1.0, y2 / height))
         if nx2 - nx1 <= 0 or ny2 - ny1 <= 0:
             continue
-        normalized.append({
-            "x1": round(nx1, 6), "y1": round(ny1, 6),
-            "x2": round(nx2, 6), "y2": round(ny2, 6),
-            "confidence": float(region["confidence"]),
-        })
+        normalized.append(_Candidate(
+            bbox=(round(nx1, 6), round(ny1, 6), round(nx2, 6), round(ny2, 6)),
+            confidence=float(candidate.confidence),
+            canonical=candidate.canonical,
+        ))
     return normalized
 
 
-def _dedupe(regions: Sequence[dict[str, float]]) -> list[dict[str, float]]:
-    kept: list[dict[str, float]] = []
-    for region in sorted(regions, key=lambda item: -item["confidence"]):
-        box = (region["x1"], region["y1"], region["x2"], region["y2"])
-        if any(
-            _overlap_ratio(box, (k["x1"], k["y1"], k["x2"], k["y2"])) > 0.5
-            for k in kept
-        ):
+def _dedupe(candidates: Sequence[_Candidate]) -> list[_Candidate]:
+    kept: list[_Candidate] = []
+    for candidate in sorted(candidates, key=lambda item: -item.confidence):
+        if any(_overlap_ratio(candidate.bbox, k.bbox) > 0.5 for k in kept):
             continue
-        kept.append(region)
+        kept.append(candidate)
     return kept
+
+
+def _locate_candidates(
+    blocks: Sequence[Any],
+    width: int,
+    height: int,
+    *,
+    min_confidence: float = MIN_CONFIDENCE,
+    padding: int = BOX_PADDING_PX,
+) -> list[_Candidate]:
+    if width <= 0 or height <= 0:
+        return []
+    candidates = _single_block_regions(blocks, min_confidence)
+    candidates.extend(_split_block_regions(blocks, min_confidence))
+    return _dedupe(_normalize(candidates, width, height, padding))
 
 
 def locate_nam_regions(
@@ -178,9 +278,51 @@ def locate_nam_regions(
     min_confidence: float = MIN_CONFIDENCE,
     padding: int = BOX_PADDING_PX,
 ) -> list[dict[str, float]]:
-    """Return normalized NAM blackout regions for one rendered page."""
-    if width <= 0 or height <= 0:
-        return []
-    regions = _single_block_regions(blocks, min_confidence)
-    regions.extend(_split_block_regions(blocks, min_confidence))
-    return _dedupe(_normalize(regions, width, height, padding))
+    """Return normalized NAM blackout regions for one rendered page.
+
+    Geometry and confidence only -- never the recognised text. Callers that
+    need to know *which* number a region covers use :func:`_locate_pairs`,
+    which is deliberately separate so this function cannot leak PII.
+    """
+    return [
+        _candidate_dict(candidate)
+        for candidate in _locate_candidates(
+            blocks, width, height, min_confidence=min_confidence, padding=padding
+        )
+    ]
+
+
+def _locate_pairs(
+    blocks: Sequence[Any],
+    width: int,
+    height: int,
+    *,
+    min_confidence: float = MIN_CONFIDENCE,
+    padding: int = BOX_PADDING_PX,
+) -> list[tuple[dict[str, float], str]]:
+    """Regions paired with the canonical NAM behind each one.
+
+    Internal: the canonical value is PII-derived and must not be forwarded to
+    a client or written to an artifact.
+    """
+    return [
+        (_candidate_dict(candidate), candidate.canonical)
+        for candidate in _locate_candidates(
+            blocks, width, height, min_confidence=min_confidence, padding=padding
+        )
+    ]
+
+
+def canonical_from_text(text: str) -> str | None:
+    """First valid NAM found in arbitrary text, or ``None``.
+
+    Reuses the same in-run search as detection, so a user who retypes what
+    they see on the page -- including the label, as in
+    ``NAM: HOGP 3361 0615`` -- is not rejected for the surrounding characters.
+    """
+    for match in _NAM_RUN.finditer(text):
+        for cleaned, _positions in _run_candidates(match.group(0), match.start()):
+            canonical = canonical_nam(cleaned)
+            if canonical is not None:
+                return canonical
+    return None
