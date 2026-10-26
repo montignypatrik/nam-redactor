@@ -1,0 +1,3 @@
+# The committed build must match a Linux rebuild byte for byte (CI checks it).
+frontend/** text=auto eol=lf
+nam_redactor/web/dist/** text=auto eol=lf

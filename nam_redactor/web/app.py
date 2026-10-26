@@ -158,10 +158,12 @@ def create_app(
     extractor_factory: Callable[[], Any] | None = None,
     retry_delays: tuple[float, ...] | None = None,
     extraction_concurrency: int | None = None,
+    preload_models: bool = False,
 ) -> FastAPI:
     """Build the app. ``engine_factory``, ``name_model_factory`` and
     ``extractor_factory`` are the seams tests use to stub OCR, NER and the
-    cloud extraction service."""
+    cloud extraction service. ``preload_models`` loads OCR and NER at startup
+    instead of on the first detection."""
     extra: dict[str, Any] = {}
     if retry_delays is not None:
         extra["retry_delays"] = retry_delays
@@ -181,6 +183,8 @@ def create_app(
     async def lifespan(_: FastAPI):
         store.sweep_stale_dirs()
         store.load_saved()
+        if preload_models:
+            store.preload()
         try:
             yield
         finally:
@@ -1008,8 +1012,10 @@ def create_app(
 
         Each row gets only the work it needs, so this is safe to repeat:
 
-        * rows without a current transcription are transcribed, and then
-          interpreted automatically -- no acceptance step in between;
+        * rows without a current transcription are transcribed and
+          interpreted in one combined call (two calls when the doctor
+          profile is unusable: then transcription only) -- no acceptance
+          step in between;
         * rows with a current transcription (reviewed or not) reuse it,
           corrections included, and are interpreted if their interpretation
           is missing, failed or outdated;

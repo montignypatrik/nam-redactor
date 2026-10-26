@@ -1875,3 +1875,29 @@ button:disabled {
 .billing-grid th.billing-grid__end {
   background: var(--surface-2);
 }
+
+/* Patient, date and time on each appointment card. */
+.card__fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 16px;
+  margin: 8px 0;
+}
+.card__field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.85rem;
+}
+.card__field span {
+  color: var(--text-muted);
+}
+.card__field--missing select,
+.card__field--missing input {
+  outline: 2px solid var(--danger);
+  outline-offset: 1px;
+}
+.card__process {
+  margin-left: auto;
+}

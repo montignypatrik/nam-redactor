@@ -3,7 +3,6 @@ import { resolveNam, sourceImageUrl } from '../api'
 import type { Bounds, Box, DoctorAssignment, PageInfo, Practice } from '../types'
 import SourcePageCanvas, { sourceGroups } from './SourcePageCanvas'
 import DoctorBar from './DoctorBar'
-import RowsWorkspace from './RowsWorkspace'
 
 interface Props {
   jobId: string
@@ -12,9 +11,6 @@ interface Props {
   practice: Practice
   doctor: DoctorAssignment | null
   onDoctorChanged: (doctor: DoctorAssignment) => void
-  onManageDoctors: () => void
-  /** Open on this tab (e.g. back from editing a doctor profile). */
-  initialTab?: 'redactions' | 'rows'
   detected: PageInfo[]
   boxesByPage: Record<number, Box[]>
   onBoxesChange: (pageNum: number, boxes: Box[]) => void
@@ -29,6 +25,8 @@ interface Props {
   onSave: () => Promise<void>
   /** A one-line outcome of the last save, e.g. approvals it invalidated. */
   notice: string | null
+  /** Done reviewing: save, process every row, go to the appointments. */
+  onConfirm: () => void
 }
 
 export default function ReviewScreen({
@@ -38,8 +36,6 @@ export default function ReviewScreen({
   practice,
   doctor,
   onDoctorChanged,
-  onManageDoctors,
-  initialTab = 'redactions',
   detected,
   boxesByPage,
   onBoxesChange,
@@ -51,8 +47,8 @@ export default function ReviewScreen({
   saving,
   onSave,
   notice,
+  onConfirm,
 }: Props) {
-  const [tab, setTab] = useState<'redactions' | 'rows'>(initialTab)
   // Review works on original pages; each shows all the sections cut from it.
   const groups = useMemo(() => sourceGroups(detected), [detected])
   const [current, setCurrent] = useState(groups[0]?.sourcePage ?? 1)
@@ -141,7 +137,7 @@ export default function ReviewScreen({
     <section className="review">
       <header className="review__head">
         <div>
-          <h1>{tab === 'redactions' ? 'Review the blackouts' : 'Appointment rows'}</h1>
+          <h1>Review the blackouts</h1>
           <p className="lede">
             <strong>{filename}</strong> · {detected.length} pages · {dpi} DPI
           </p>
@@ -168,57 +164,23 @@ export default function ReviewScreen({
           >
             {saving ? 'Saving…' : 'Save review'}
           </button>
-          {tab === 'redactions' && (
-            <button type="button" onClick={onResetAll} disabled={!edited}>
-              Reset to detected
-            </button>
-          )}
+          <button type="button" onClick={onResetAll} disabled={!edited}>
+            Reset to detected
+          </button>
+          <button
+            type="button"
+            className="primary"
+            onClick={onConfirm}
+            disabled={saving || undated.length > 0}
+            title={undated.length ? 'Every page needs a date first' : 'Save, then read and bill every appointment'}
+          >
+            Confirm review
+          </button>
         </div>
       </header>
 
-      <div className="tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'redactions'}
-          className={tab === 'redactions' ? 'tab tab--on' : 'tab'}
-          onClick={() => setTab('redactions')}
-        >
-          Redactions
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'rows'}
-          className={tab === 'rows' ? 'tab tab--on' : 'tab'}
-          onClick={async () => {
-            // Rows and their evidence are built on the saved review.
-            if (dirty || !reviewRevision) await onSave()
-            setTab('rows')
-          }}
-          disabled={saving || undated.length > 0}
-          title={undated.length ? 'Every page needs a date first' : undefined}
-        >
-          Appointment rows
-        </button>
-      </div>
-
       {notice && <p className="notice">{notice}</p>}
 
-      {tab === 'rows' && (
-        <RowsWorkspace
-          jobId={jobId}
-          pages={detected.map((page) => ({ ...page, date: datesByPage[page.page_num] ?? page.date }))}
-          reviewRevision={reviewRevision}
-          reviewDirty={dirty}
-          onSaveReview={onSave}
-          doctor={doctor}
-          onManageDoctors={onManageDoctors}
-        />
-      )}
-
-      {tab === 'redactions' && (
-      <>
       <p className="hint">
         Every black rectangle is burned into the appointment row images — nothing
         underneath survives. NAM boxes are stamped with the
@@ -327,8 +289,6 @@ export default function ReviewScreen({
           )}
         </div>
       </div>
-      </>
-      )}
     </section>
   )
 }

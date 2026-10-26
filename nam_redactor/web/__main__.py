@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
 
     url = f"http://{DEFAULT_HOST}:{args.port}"
     data_dir = args.data_dir or default_data_dir()
-    app = create_app(dir_root=data_dir)
+    app = create_app(dir_root=data_dir, preload_models=True)
 
     print(f"nam-redactor is running at {url}")
     print(f"Documents are saved in {data_dir}")

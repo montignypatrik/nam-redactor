@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { confirmBilling, reopenBilling, resetBilling, rowEvidenceUrl, saveBillingLines } from '../api'
-import { type BillingColumn, type BillingLine, type DoctorAssignment, type Row } from '../types'
+import { type BillingColumn, type BillingLine, type DoctorAssignment, type Row, type RowPatch } from '../types'
 import ExtractionPanel from './ExtractionPanel'
 import InterpretationPanel from './InterpretationPanel'
 
@@ -8,6 +8,8 @@ interface Props {
   jobId: string
   row: Row
   label: string
+  /** Patient IDs found in the document, for the patient dropdown. */
+  patients: string[]
   reviewRevision: number
   /** Show crops scaled to the card's width instead of at full size. */
   fitWidth: boolean
@@ -16,9 +18,10 @@ interface Props {
   /** Something document-wide is running (saving the review, a batch). */
   busy: boolean
   onUpdated: (row: Row) => void
+  /** Change the row's patient, date or time. */
+  onPatch: (change: RowPatch) => void
   /** Fetch the row as saved now (after a conflict). */
   fetchLatest: () => Promise<Row | undefined>
-  onEditDetails: () => void
   onInterpret: () => void
   onExtract: () => void
   onManageDoctors: () => void
@@ -45,6 +48,8 @@ interface Draft {
 }
 
 const SAVE_DELAY = 700
+/** The patient dropdown's "No patient" choice (a call with no health number, say). */
+const NO_PATIENT = '__no_patient__'
 const EDITABLE: BillingColumn[] = ['ProcedureCode', 'Units', 'ContextualElements']
 /** The columns shown on the card. The CSV still has all 17 (the others are
  *  always empty); these are the ones the person needs to see. */
@@ -86,11 +91,11 @@ const parseContexts = (text: string) =>
     .filter(Boolean)
 
 const INTERPRETATION_NOTES: Partial<Record<Row['interpretation']['state'], string>> = {
-  not_ready: 'Not transcribed yet.',
+  not_ready: 'Not processed yet.',
   pending: 'Billing not proposed yet.',
   running: 'Processing…',
   failed: 'The interpretation failed; you can retry it under Details, or enter the codes yourself.',
-  stale: 'The proposal is outdated; Extract all rows will redo it.',
+  stale: 'The proposal is outdated; Process all rows will redo it.',
   blocked: 'Billing cannot be proposed for this document.',
 }
 
@@ -103,14 +108,15 @@ export default function AppointmentCard({
   jobId,
   row,
   label,
+  patients,
   reviewRevision,
   fitWidth,
   configured,
   doctor,
   busy,
   onUpdated,
+  onPatch,
   fetchLatest,
-  onEditDetails,
   onInterpret,
   onExtract,
   onManageDoctors,
@@ -310,7 +316,10 @@ export default function AppointmentCard({
       : view.state === 'outdated' || (view.source === 'manual' && view.edits_current === false)
         ? { text: 'Needs attention', className: 'chip chip--warn' }
         : { text: 'Draft', className: 'chip' }
-  const note = view.source === 'manual' ? null : INTERPRETATION_NOTES[view.interpretation_state]
+  const note = running ? 'Processing…' : view.source === 'manual' ? null : INTERPRETATION_NOTES[view.interpretation_state]
+  const extraction = row.extraction
+  const canProcess = !running && (extraction.attempt_count === 0 || extraction.state === 'failed')
+  const needsPatient = row.unresolved.includes('patient_id')
   const outdated = view.source === 'manual' && view.edits_current === false
   const time = view.shared.ProcedureTime
 
@@ -339,6 +348,63 @@ export default function AppointmentCard({
           <span className={status.className}>{status.text}</span>
         </span>
       </header>
+
+      <div className="card__fields">
+        <label className={needsPatient ? 'card__field card__field--missing' : 'card__field'}>
+          <span>Patient</span>
+          <select
+            value={row.fields.patient_id.value ?? (row.fields.patient_id.status === 'confirmed' ? NO_PATIENT : '')}
+            disabled={running || busy || confirmed}
+            onChange={(event) => {
+              const value = event.target.value
+              onPatch(value === NO_PATIENT ? { no_patient: true } : { patient_id: value || null })
+            }}
+          >
+            <option value="">— choose a patient —</option>
+            <option value={NO_PATIENT}>No patient</option>
+            {patients.map((patient) => (
+              <option key={patient} value={patient}>
+                {patient}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className={row.unresolved.includes('date') ? 'card__field card__field--missing' : 'card__field'}>
+          <span>Date</span>
+          <input
+            type="date"
+            value={row.fields.date.value ?? ''}
+            disabled={running || busy || confirmed}
+            onChange={(event) => onPatch({ date: event.target.value || null })}
+          />
+        </label>
+        <label className="card__field" title="Leave blank to read it from the row">
+          <span>Time</span>
+          <input
+            type="time"
+            value={row.fields.time.value ?? ''}
+            disabled={running || busy || confirmed}
+            onChange={(event) => onPatch({ time: event.target.value || null })}
+          />
+        </label>
+        {canProcess && (
+          <button
+            type="button"
+            className="card__process"
+            onClick={onExtract}
+            disabled={busy || !configured || row.unresolved.length > 0}
+            title={
+              row.unresolved.length
+                ? needsPatient
+                  ? 'Choose the patient (or "No patient") first'
+                  : 'Add the date first'
+                : 'Read and bill this row (one call)'
+            }
+          >
+            {extraction.attempt_count === 0 ? 'Process row' : 'Process again'}
+          </button>
+        )}
+      </div>
 
       <div className={fitWidth ? 'card__crop card__crop--fit' : 'card__crop'}>
         <img
@@ -512,12 +578,7 @@ export default function AppointmentCard({
       )}
       {view.problems.length > 0 && !outdated && (
         <p className="card__problems">
-          Not exportable yet: {view.problems.join('; ')}.{' '}
-          {view.problems.some((p) => /patient|health number|date/.test(p)) && (
-            <button type="button" className="link" onClick={onEditDetails}>
-              Fix patient or date
-            </button>
-          )}
+          Not exportable yet: {view.problems.join('; ')}.
         </p>
       )}
 
