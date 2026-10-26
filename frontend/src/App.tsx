@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   fetchPages,
   getJob,
+  listRows,
   saveReview,
   startDetection,
   streamEvents,
@@ -13,9 +14,11 @@ import ReviewScreen from './components/ReviewScreen'
 import UploadScreen from './components/UploadScreen'
 import ZoneScreen from './components/ZoneScreen'
 import DoctorProfilesScreen from './components/DoctorProfilesScreen'
+import DoctorBar from './components/DoctorBar'
+import RowsWorkspace from './components/RowsWorkspace'
 import type { Box, DoctorAssignment, PageInfo, PagePayload, UploadResponse } from './types'
 
-type Stage = 'upload' | 'doctors' | 'zones' | 'detecting' | 'review' | 'error'
+type Stage = 'upload' | 'doctors' | 'zones' | 'detecting' | 'review' | 'rows' | 'error'
 
 interface PageResult {
   page_num: number
@@ -54,7 +57,8 @@ export default function App() {
   const [doctorsStartNew, setDoctorsStartNew] = useState(false)
   /** Where "Done" on the profiles screen goes back to. */
   const [doctorsReturn, setDoctorsReturn] = useState<'upload' | 'rows'>('upload')
-  const [reviewTab, setReviewTab] = useState<'redactions' | 'rows'>('redactions')
+  /** The review was just confirmed: the appointments page processes every row. */
+  const [autoProcess, setAutoProcess] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [totalPages, setTotalPages] = useState<number | null>(null)
   const [pageResults, setPageResults] = useState<PageResult[]>([])
@@ -139,7 +143,9 @@ export default function App() {
       } else if (status.status === 'queued' || status.status === 'detecting') {
         void followDetection(opened.job_id)
       } else {
-        await showReview(opened.job_id)
+        // A document already processed reopens on its appointments.
+        const { rows } = await listRows(opened.job_id)
+        await showReview(opened.job_id, rows.some((row) => row.extraction.attempt_count > 0) ? 'rows' : 'review')
       }
     } catch (cause) {
       fail(cause, 'Could not open the document.')
@@ -205,7 +211,7 @@ export default function App() {
     void followDetection(created.job_id)
   }
 
-  const showReview = async (jobId: string) => {
+  const showReview = async (jobId: string, target: 'review' | 'rows' = 'review') => {
     try {
       const pages = await fetchPages(jobId)
       const boxes = cloneBoxes(pages.pages, 'boxes')
@@ -225,7 +231,7 @@ export default function App() {
       setReviewRevision(pages.review_revision)
       // Until a first save, the detections are unsaved work.
       setSavedSnapshot(pages.review_revision ? snapshot(boxes, dates) : '')
-      setStage('review')
+      setStage(target)
     } catch (cause) {
       fail(cause, 'Could not load the detected boxes.')
     }
@@ -261,6 +267,20 @@ export default function App() {
     // reviewPayload reads boxesByPage and datesByPage, listed here.
   }, [job, boxesByPage, datesByPage, reviewRevision])
 
+  /** Done reviewing: save if needed, then process every row on the appointments page. */
+  const handleConfirmReview = async () => {
+    if (dirty || !reviewRevision) {
+      try {
+        await handleSave()
+      } catch {
+        return // the notice says why
+      }
+    }
+    setNotice(null)
+    setAutoProcess(true)
+    setStage('rows')
+  }
+
   const handleBoxesChange = useCallback((pageNum: number, boxes: Box[]) => {
     setBoxesByPage((previous) => ({ ...previous, [pageNum]: boxes }))
   }, [])
@@ -284,9 +304,8 @@ export default function App() {
     setStage('doctors')
   }
 
-  /** From review: edit a profile, then come back to the appointment rows. */
-  const openDoctorsFromReview = () => {
-    if (dirty && !window.confirm('Leave without saving your redaction changes?')) return
+  /** From the appointments: edit a profile, then come back to them. */
+  const openDoctorsFromRows = () => {
     setDoctorsStartNew(false)
     setDoctorsReturn('rows')
     setStage('doctors')
@@ -309,7 +328,7 @@ export default function App() {
     setError(null)
     setNotice(null)
     setZoneDraft(null)
-    setReviewTab('redactions')
+    setAutoProcess(false)
     setStage('upload')
   }
 
@@ -350,8 +369,7 @@ export default function App() {
           startNew={doctorsStartNew}
           onDone={(profileId) => {
             if (doctorsReturn === 'rows' && job) {
-              setReviewTab('rows')
-              void showReview(job.job_id)
+              void showReview(job.job_id, 'rows')
               return
             }
             if (profileId) setPreferredDoctor(profileId)
@@ -393,8 +411,6 @@ export default function App() {
           practice={job}
           doctor={job.doctor ?? null}
           onDoctorChanged={handleDoctorChanged}
-          onManageDoctors={openDoctorsFromReview}
-          initialTab={reviewTab}
           detected={detected}
           boxesByPage={boxesByPage}
           onBoxesChange={handleBoxesChange}
@@ -406,7 +422,35 @@ export default function App() {
           saving={saving}
           onSave={handleSave}
           notice={notice}
+          onConfirm={() => void handleConfirmReview()}
         />
+      )}
+
+      {stage === 'rows' && job && (
+        <section className="review">
+          <header className="review__head">
+            <div>
+              <h1>Appointments</h1>
+              <p className="lede">
+                <strong>{job.filename}</strong>
+              </p>
+              <DoctorBar jobId={job.job_id} doctor={job.doctor ?? null} practice={job} onChanged={handleDoctorChanged} />
+            </div>
+            <div className="review__actions">
+              <button type="button" onClick={() => setStage('review')}>
+                Back to review
+              </button>
+            </div>
+          </header>
+          <RowsWorkspace
+            jobId={job.job_id}
+            reviewRevision={reviewRevision}
+            doctor={job.doctor ?? null}
+            onManageDoctors={openDoctorsFromRows}
+            autoProcess={autoProcess}
+            onAutoProcessed={() => setAutoProcess(false)}
+          />
+        </section>
       )}
 
       {stage === 'error' && (

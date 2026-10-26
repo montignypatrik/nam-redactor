@@ -571,6 +571,24 @@ class JobStore:
                 self._name_model_loaded = True
             return self._name_model
 
+    def preload(self) -> None:
+        """Load the OCR and name models in the background, so the first
+        detection does not wait for them. Queued on the OCR worker, so a
+        detection started meanwhile simply runs after it. A failure here is
+        ignored: detection loads the models again and reports the error."""
+
+        def load() -> None:
+            try:
+                engine = self._get_engine()
+                validate = getattr(engine, "validate", None)
+                if callable(validate):
+                    validate()
+                self._get_name_model()
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._executor.submit(load)
+
     def sweep_stale_dirs(self) -> None:
         """Remove what a crash can leave behind, never a saved document.
 
@@ -697,7 +715,12 @@ class JobStore:
         A row already queued or running is skipped, so repeated clicks never
         start duplicate work. Each attempt records the basis it will run on;
         the result is attached only if the row still has that basis.
+
+        With ``then_interpret`` and a usable doctor profile, transcription and
+        interpretation are one combined call (see :meth:`_run_extraction`).
         """
+        _, version = self.assigned_version(job) if then_interpret else (None, None)
+        combined = _profile_usable(version) and hasattr(self._get_extractor(), "extract_and_interpret")
         queued: list[tuple[str, str]] = []
         skipped: dict[str, str] = {}
         for row_id in row_ids:
@@ -720,6 +743,12 @@ class JobStore:
                 # Transcription flows straight into interpretation: no
                 # acceptance step in between.
                 attempt["then_interpret"] = then_interpret
+                if combined:
+                    attempt.update(
+                        combined=True,
+                        prompt_version=ex.COMBINED_PROMPT_VERSION,
+                        schema_version=ex.COMBINED_SCHEMA_VERSION,
+                    )
                 record["attempts"].append(attempt)
             queued.append((row_id, attempt["attempt_id"]))
         if queued:
@@ -740,6 +769,44 @@ class JobStore:
             attempt.update(changes)
             attempt["finished_at"] = rowlib.now_iso()
         self.save(job)
+
+    def _finish_fields(self, job: Job, row_id: str, attempt_id: str, **changes: Any) -> None:
+        """Change an attempt's fields without finishing it."""
+        with job.extract_lock:
+            attempt = self._attempt(job, row_id, attempt_id)
+            if attempt is not None:
+                attempt.update(changes)
+        self.save(job)
+
+    def _record_combined_interpretation(
+        self, job: Job, row: dict[str, Any], attempt: dict[str, Any], output: Any,
+        doctor: dict[str, Any] | None, version: dict[str, Any] | None,
+    ) -> None:
+        """Store the interpretation half of a combined call as an
+        interpretation attempt of its own, based on the transcription it came
+        with. Called holding ``job.extract_lock``; the usage stays on the
+        transcription attempt, which made the one call."""
+        row_id = row["row_id"]
+        inputs, _ = ilib.inputs_of(
+            row, job.extractions.get(row_id), job.effective_boxes(row["working_page"]), doctor, version
+        )
+        if inputs is None:
+            return
+        interpretation = ilib.new_attempt(inputs, attempt["requested_model"])
+        interpretation.update(
+            status=ilib.SUCCEEDED,
+            prompt_version=ex.COMBINED_PROMPT_VERSION,
+            schema_version=ex.COMBINED_SCHEMA_VERSION,
+            combined_with=attempt["attempt_id"],
+            started_at=attempt["started_at"],
+            finished_at=attempt["finished_at"],
+            tries=attempt["tries"],
+            result=output.result["interpretation"],
+            returned_model=output.returned_model,
+            provider=output.provider,
+            generation_id=output.generation_id,
+        )
+        job.interpretations.setdefault(row_id, ilib.empty_record())["attempts"].append(interpretation)
 
     def _evidence_for_send(self, job: Job, row_id: str, basis: dict[str, Any]) -> tuple[bytes | None, str]:
         """The attempt's evidence, if it may still be sent -- else ``(None, reason)``.
@@ -785,7 +852,15 @@ class JobStore:
                 basis = dict(attempt["basis"])
                 model = attempt["requested_model"]
                 then_interpret = bool(attempt.get("then_interpret"))
+                combined = bool(attempt.get("combined"))
             self.save(job)
+            # The profile is read when the call goes out; if it became unusable
+            # meanwhile, this falls back to transcribing alone.
+            doctor, version = self.assigned_version(job) if then_interpret else (None, None)
+            if combined and not _profile_usable(version):
+                combined = False
+                self._finish_fields(job, row_id, attempt_id, combined=False,
+                                    prompt_version=ex.PROMPT_VERSION, schema_version=ex.SCHEMA_VERSION)
 
             while True:
                 # The frozen evidence of the approval -- exactly what the
@@ -799,7 +874,12 @@ class JobStore:
                     return
                 tries += 1
                 try:
-                    output = self._get_extractor().extract(png, model)
+                    if combined:
+                        output = self._get_extractor().extract_and_interpret(
+                            png, version["instructions"], tuple(dict(e) for e in version["examples"]), model
+                        )
+                    else:
+                        output = self._get_extractor().extract(png, model)
                     break
                 except ex.ExtractionError as err:
                     # Invalid output gets one more sample; other transient
@@ -822,7 +902,9 @@ class JobStore:
 
             # Recheck before attaching: the row may have changed while the
             # request was in flight. Then the result is kept, but superseded.
-            doctor, version = self.assigned_version(job) if then_interpret else (None, None)
+            if not combined:
+                doctor, version = self.assigned_version(job) if then_interpret else (None, None)
+            transcription = output.result["transcription"] if combined else output.result
             follow_up: list[tuple[str, str]] = []
             with job.extract_lock:
                 row = job.rows.get(row_id)
@@ -833,15 +915,17 @@ class JobStore:
                 attempt = self._attempt(job, row_id, attempt_id)
                 if attempt is not None:
                     attempt.update(
-                        status=status, tries=tries, result=output.result,
+                        status=status, tries=tries, result=transcription,
                         returned_model=output.returned_model, provider=output.provider,
                         generation_id=output.generation_id, usage=output.usage,
                         finished_at=rowlib.now_iso(),
                     )
+                    if status == exlib.SUCCEEDED and combined:
+                        self._record_combined_interpretation(job, row, attempt, output, doctor, version)
                     # Straight on to interpretation, recorded under the same
                     # lock: the row is never seen as idle in between. A
                     # blocked or busy row is simply skipped.
-                    if status == exlib.SUCCEEDED and then_interpret:
+                    elif status == exlib.SUCCEEDED and then_interpret:
                         follow_up, _ = self._queue_interpretations(job, [row_id], model, doctor, version)
             self.save(job)
             self._submit_interpretations(job, follow_up)
@@ -1185,6 +1269,11 @@ class _LazyNameModel:
         if model is None:
             return [[] for _ in lines]
         return model.find_names(lines)
+
+
+def _profile_usable(version: dict[str, Any] | None) -> bool:
+    """The assigned profile version has something to interpret with."""
+    return version is not None and bool(version["instructions"].strip() or version["examples"])
 
 
 def reset_to_zones(job: Job) -> None:

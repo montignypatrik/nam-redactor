@@ -137,9 +137,7 @@ export default function ZoneScreen({
                 : undefined
             }
           >
-            {busy
-              ? 'Starting…'
-              : `Continue with ${totalZones} zone${totalZones === 1 ? '' : 's'}`}
+            {busy ? 'Starting…' : 'Continue'}
           </button>
         </div>
       </header>
