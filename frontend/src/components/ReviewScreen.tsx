@@ -21,8 +21,6 @@ interface Props {
   datesByPage: Record<number, string>
   onDateChange: (pageNum: number, date: string) => void
   onResetAll: () => void
-  onFinalize: () => void
-  busy: boolean
   /** Revision of the saved review; 0 until the first save. */
   reviewRevision: number
   /** The on-screen redactions or dates differ from the saved review. */
@@ -48,8 +46,6 @@ export default function ReviewScreen({
   datesByPage,
   onDateChange,
   onResetAll,
-  onFinalize,
-  busy,
   reviewRevision,
   dirty,
   saving,
@@ -168,24 +164,15 @@ export default function ReviewScreen({
           <button
             type="button"
             onClick={() => void onSave()}
-            disabled={busy || saving || (!dirty && reviewRevision > 0) || undated.length > 0}
+            disabled={saving || (!dirty && reviewRevision > 0) || undated.length > 0}
           >
             {saving ? 'Saving…' : 'Save review'}
           </button>
           {tab === 'redactions' && (
-            <button type="button" onClick={onResetAll} disabled={!edited || busy}>
+            <button type="button" onClick={onResetAll} disabled={!edited}>
               Reset to detected
             </button>
           )}
-          <button
-            type="button"
-            className="primary"
-            onClick={onFinalize}
-            disabled={busy || undated.length > 0}
-            title={undated.length ? 'Every page needs a date' : undefined}
-          >
-            {busy ? 'Redacting…' : `Redact ${totalBoxes} box${totalBoxes === 1 ? '' : 'es'}`}
-          </button>
         </div>
       </header>
 
@@ -233,8 +220,8 @@ export default function ReviewScreen({
       {tab === 'redactions' && (
       <>
       <p className="hint">
-        Every black rectangle will be burned into the output — the text layer is
-        discarded, so nothing underneath survives. NAM boxes are stamped with the
+        Every black rectangle is burned into the appointment row images — nothing
+        underneath survives. NAM boxes are stamped with the
         patient ID in white; patient names (amber outline) are blacked out with
         no label. <strong>Drag</strong> on the page to add a box;{' '}
         <strong>click</strong> a box and press <kbd>Delete</kbd> to remove it.

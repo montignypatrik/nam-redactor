@@ -67,16 +67,6 @@ export async function startDetection(jobId: string, pages: PagePayload[]): Promi
   if (!response.ok) throw new Error(await readError(response))
 }
 
-export async function finalize(jobId: string, pages: PagePayload[]) {
-  const response = await fetch(`/api/jobs/${jobId}/finalize`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pages }),
-  })
-  if (!response.ok) throw new Error(await readError(response))
-  return response.json()
-}
-
 /**
  * Resolve a hand-typed NAM to its pseudonym.
  *
@@ -217,10 +207,6 @@ export async function downloadManifest(jobId: string): Promise<ManifestSummary> 
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
   return JSON.parse(text) as ManifestSummary
-}
-
-export function resultUrl(jobId: string): string {
-  return `/api/jobs/${jobId}/result`
 }
 
 /**

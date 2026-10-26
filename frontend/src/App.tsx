@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   fetchPages,
-  finalize,
   getJob,
   saveReview,
   startDetection,
@@ -9,7 +8,6 @@ import {
   uploadPdf,
 } from './api'
 import DocumentList from './components/DocumentList'
-import DoneScreen from './components/DoneScreen'
 import ProgressScreen from './components/ProgressScreen'
 import ReviewScreen from './components/ReviewScreen'
 import UploadScreen from './components/UploadScreen'
@@ -17,7 +15,7 @@ import ZoneScreen from './components/ZoneScreen'
 import DoctorProfilesScreen from './components/DoctorProfilesScreen'
 import type { Box, DoctorAssignment, PageInfo, PagePayload, UploadResponse } from './types'
 
-type Stage = 'upload' | 'doctors' | 'zones' | 'detecting' | 'review' | 'finalizing' | 'done' | 'error'
+type Stage = 'upload' | 'doctors' | 'zones' | 'detecting' | 'review' | 'error'
 
 interface PageResult {
   page_num: number
@@ -69,11 +67,6 @@ export default function App() {
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [zoneDraft, setZoneDraft] = useState<ZoneDraft | null>(null)
-  const [finalCounts, setFinalCounts] = useState<{
-    total: number
-    names: number
-    perPage: number[]
-  }>({ total: 0, names: 0, perPage: [] })
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -280,38 +273,6 @@ export default function App() {
     setBoxesByPage(cloneBoxes(detected, 'detected_boxes'))
   }, [detected])
 
-  const handleFinalize = async () => {
-    if (!job) return
-    setError(null)
-    setStage('finalizing')
-
-    const controller = new AbortController()
-    abortRef.current = controller
-
-    try {
-      // Finalize saves this review first, then renders what was saved.
-      await finalize(job.job_id, reviewPayload())
-      await streamEvents(
-        job.job_id,
-        'finalize',
-        (event) => {
-          if (event.type === 'done') {
-            setFinalCounts({
-              total: event.total_nams ?? 0,
-              names: event.total_names ?? 0,
-              perPage: event.per_page_counts ?? [],
-            })
-            setStage('done')
-          }
-          if (event.type === 'error') fail(new Error(event.message ?? 'Redaction failed.'), '')
-        },
-        controller.signal,
-      )
-    } catch (cause) {
-      if (!controller.signal.aborted) fail(cause, 'Redaction failed.')
-    }
-  }
-
   /** The document's doctor changed: identifiers follow the new snapshot. */
   const handleDoctorChanged = useCallback((doctor: DoctorAssignment) => {
     setJob((current) => current && { ...current, ...doctor.snapshot, doctor })
@@ -424,7 +385,7 @@ export default function App() {
         />
       )}
 
-      {(stage === 'review' || stage === 'finalizing') && job && (
+      {stage === 'review' && job && (
         <ReviewScreen
           jobId={job.job_id}
           filename={job.filename}
@@ -440,25 +401,11 @@ export default function App() {
           datesByPage={datesByPage}
           onDateChange={handleDateChange}
           onResetAll={handleResetAll}
-          onFinalize={handleFinalize}
-          busy={stage === 'finalizing'}
           reviewRevision={reviewRevision}
           dirty={dirty}
           saving={saving}
           onSave={handleSave}
           notice={notice}
-        />
-      )}
-
-      {stage === 'done' && job && (
-        <DoneScreen
-          jobId={job.job_id}
-          filename={job.filename}
-          totalNams={finalCounts.total}
-          totalNames={finalCounts.names}
-          perPageCounts={finalCounts.perPage}
-          onBackToReview={() => void showReview(job.job_id)}
-          onDocuments={handleDocuments}
         />
       )}
 
