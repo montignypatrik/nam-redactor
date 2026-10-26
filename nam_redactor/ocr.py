@@ -32,7 +32,7 @@ class PaddleOCREngine:
 
     def __init__(
         self,
-        lang: str = "fr",
+        lang: Optional[str] = None,
         device: str = "cpu",
         text_detection_model_name: Optional[str] = "PP-OCRv5_mobile_det",
         text_recognition_model_name: Optional[str] = "PP-OCRv5_mobile_rec",
@@ -69,7 +69,6 @@ class PaddleOCREngine:
                 ) from exc
 
             ocr_kwargs = {
-                "lang": self.lang,
                 "device": self.device,
                 "use_doc_orientation_classify": self.use_doc_orientation_classify,
                 "use_doc_unwarping": self.use_doc_unwarping,
@@ -77,6 +76,10 @@ class PaddleOCREngine:
                 "enable_mkldnn": self.enable_mkldnn,
                 **self.extra_ocr_kwargs,
             }
+            # PaddleOCR ignores lang whenever explicit model names are given,
+            # so only pass it when the caller actually asked for it.
+            if self.lang is not None:
+                ocr_kwargs["lang"] = self.lang
             if self.text_detection_model_name is not None:
                 ocr_kwargs["text_detection_model_name"] = self.text_detection_model_name
             if self.text_recognition_model_name is not None:
